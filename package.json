@@ -21,9 +21,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/n8n-nodes-postgresql-copy.git"
+    "url": "git+https://github.com/hanafifirman11/n8n-nodes-postgresql-copy.git"
   },
-  "homepage": "https://github.com/yourusername/n8n-nodes-postgresql-copy",
+  "homepage": "https://github.com/hanafifirman11/n8n-nodes-postgresql-copy",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
