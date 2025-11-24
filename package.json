@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-postgresql-copy",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "description": "n8n community node for PostgreSQL COPY command - efficient bulk import/export",
   "keywords": [
     "n8n-community-node-package",

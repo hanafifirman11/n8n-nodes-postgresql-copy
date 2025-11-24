@@ -271,13 +271,15 @@ export class PostgresCopy implements INodeType {
 
 		const credentials = (await this.getCredentials('postgres')) as IDataObject;
 
+		const sslConfig = PostgresCopy.buildSslConfig(credentials);
+
 		const client = new Client({
 			host: credentials.host as string,
 			port: credentials.port as number,
 			database: credentials.database as string,
 			user: credentials.user as string,
 			password: credentials.password as string,
-			ssl: (credentials.ssl as boolean | object) || false,
+			ssl: sslConfig,
 			allowExitOnIdle: (credentials.allowExitOnIdle as boolean) || false,
 		});
 
@@ -319,6 +321,39 @@ export class PostgresCopy implements INodeType {
 		if (format === 'tsv') return '\t';
 		if (format === 'custom') return custom || '|';
 		return ',';
+	}
+
+	// Normalize SSL config coming from n8n Postgres credentials to pg client format
+	private static buildSslConfig(creds: IDataObject): boolean | object {
+		const sslVal = creds.ssl;
+		const ignore =
+			(creds.allowUnauthorizedCerts as boolean) ||
+			(creds.ignoreSslIssues as boolean) ||
+			(creds.rejectUnauthorized === false);
+
+		if (sslVal === false || sslVal === undefined) {
+			return false;
+		}
+
+		if (typeof sslVal === 'string') {
+			const v = sslVal.toLowerCase();
+			// values like "disable", "allow", "prefer" should not force SSL
+			if (['disable', 'off', 'false', 'allow', 'prefer'].includes(v)) {
+				return false;
+			}
+			// other string modes -> enable ssl
+			return { rejectUnauthorized: ignore ? false : true };
+		}
+
+		if (sslVal === true) {
+			return { rejectUnauthorized: ignore ? false : true };
+		}
+
+		if (typeof sslVal === 'object') {
+			return { ...(sslVal as object), rejectUnauthorized: ignore ? false : (sslVal as any).rejectUnauthorized ?? true };
+		}
+
+		return false;
 	}
 
 	async executeCopyTo(

@@ -253,13 +253,14 @@ class PostgresCopy {
         const returnData = [];
         const operation = this.getNodeParameter('operation', 0);
         const credentials = await this.getCredentials('postgres');
+        const sslConfig = PostgresCopy.buildSslConfig(credentials);
         const client = new pg_1.Client({
             host: credentials.host,
             port: credentials.port,
             database: credentials.database,
             user: credentials.user,
             password: credentials.password,
-            ssl: credentials.ssl || false,
+            ssl: sslConfig,
             allowExitOnIdle: credentials.allowExitOnIdle || false,
         });
         try {
@@ -306,6 +307,27 @@ class PostgresCopy {
         if (format === 'custom')
             return custom || '|';
         return ',';
+    }
+    static buildSslConfig(creds) {
+        const sslVal = creds.ssl;
+        const ignore = creds.allowUnauthorizedCerts || creds.ignoreSslIssues || creds.rejectUnauthorized === false;
+        if (sslVal === false || sslVal === undefined) {
+            return false;
+        }
+        if (typeof sslVal === 'string') {
+            const v = sslVal.toLowerCase();
+            if (['disable', 'off', 'false', 'allow', 'prefer'].includes(v)) {
+                return false;
+            }
+            return { rejectUnauthorized: ignore ? false : true };
+        }
+        if (sslVal === true) {
+            return { rejectUnauthorized: ignore ? false : true };
+        }
+        if (typeof sslVal === 'object') {
+            return Object.assign(Object.assign({}, sslVal), { rejectUnauthorized: ignore ? false : sslVal.rejectUnauthorized ?? true });
+        }
+        return false;
     }
     async executeCopyTo(client, itemIndex) {
         const timeoutMs = 30000;
