@@ -1,0 +1,9 @@
+coverage
+dist/test
+test
+docs
+examples
+*.log
+node_modules
+src
+.DS_Store

@@ -1,0 +1,64 @@
+{
+  "name": "n8n-nodes-postgresql-copy",
+  "version": "1.0.4",
+  "description": "n8n community node for PostgreSQL COPY command - efficient bulk import/export",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "postgresql",
+    "postgres",
+    "copy",
+    "bulk",
+    "import",
+    "export",
+    "csv",
+    "tsv"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Firman Hanafi",
+    "email": "developer@example.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/n8n-nodes-postgresql-copy.git"
+  },
+  "homepage": "https://github.com/yourusername/n8n-nodes-postgresql-copy",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "echo \"(lint placeholder)\"",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/PostgresApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/PostgresCopy/PostgresCopy.node.js"
+    ]
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "pg": "^8.11.0",
+    "pg-copy-streams": "^6.0.5"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "jest": "^29.0.0",
+    "n8n-core": "^1.0.0",
+    "n8n-workflow": "^1.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
