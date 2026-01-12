@@ -265,31 +265,42 @@ class PostgresCopy {
             password: credentials.password,
             ssl: sslConfig,
         });
+        await client.connect();
         try {
-            await client.connect();
             for (let i = 0; i < items.length; i++) {
-                if (operation === 'copyTo') {
-                    const result = await PostgresCopy.prototype.executeCopyTo.call(this, client, i);
-                    returnData.push(result);
+                try {
+                    if (operation === 'copyTo') {
+                        const result = await PostgresCopy.prototype.executeCopyTo.call(this, client, i);
+                        returnData.push(result);
+                    }
+                    else if (operation === 'copyFrom') {
+                        const result = await PostgresCopy.prototype.executeCopyFrom.call(this, client, items[i], i);
+                        returnData.push(result);
+                    }
+                    else {
+                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unsupported operation: ${operation}`, {
+                            itemIndex: i,
+                        });
+                    }
                 }
-                else if (operation === 'copyFrom') {
-                    const result = await PostgresCopy.prototype.executeCopyFrom.call(this, client, items[i], i);
-                    returnData.push(result);
-                }
-                else {
-                    throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unsupported operation: ${operation}`, {
-                        itemIndex: i,
-                    });
+                catch (error) {
+                    // Handle errors per item
+                    if (this.continueOnFail()) {
+                        // Continue on fail: push error data to output
+                        returnData.push({
+                            json: {
+                                error: error.message || String(error),
+                            },
+                            pairedItem: {
+                                item: i,
+                            },
+                        });
+                        continue;
+                    }
+                    // Re-throw error to stop workflow
+                    throw error;
                 }
             }
-        }
-        catch (error) {
-            // If error is already a NodeOperationError, re-throw as-is to preserve metadata
-            if (error instanceof n8n_workflow_1.NodeOperationError) {
-                throw error;
-            }
-            // Otherwise wrap in NodeOperationError
-            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message || String(error));
         }
         finally {
             await client.end().catch(() => { });
@@ -431,6 +442,7 @@ class PostgresCopy {
         };
     }
     async executeCopyFrom(client, item, itemIndex) {
+        var _a, _b;
         const timeoutMs = 30000; // hard timeout to avoid hanging
         const tableName = this.getNodeParameter('tableName', itemIndex);
         const inputBinaryField = this.getNodeParameter('inputBinaryField', itemIndex);
@@ -438,6 +450,12 @@ class PostgresCopy {
         const hasHeader = this.getNodeParameter('hasHeader', itemIndex);
         const columnMapping = this.getNodeParameter('columnMapping', itemIndex, {});
         const inputOptions = this.getNodeParameter('inputOptions', itemIndex, {}) || {};
+        const tableCheck = await client.query('SELECT to_regclass($1) as regclass', [tableName]);
+        if (!((_b = (_a = tableCheck.rows) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.regclass)) {
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Table does not exist: ${tableName}`, {
+                itemIndex,
+            });
+        }
         if (!item.binary || !item.binary[inputBinaryField]) {
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), `No binary data found in property "${inputBinaryField}"`, {
                 itemIndex,
@@ -465,6 +483,7 @@ class PostgresCopy {
         const copyCommand = `COPY ${tableName} ${columnClause} FROM STDIN WITH (${opts.join(', ')})`;
         const dryRun = inputOptions.dryRun;
         let rowsImported = 0;
+        let timeout;
         try {
             await client.query('BEGIN');
             // @ts-expect-error - pg-copy-streams returns Writable but pg types expect Submittable
@@ -473,7 +492,7 @@ class PostgresCopy {
             // Add timeout protection with race condition
             const pipelinePromise = (0, promises_1.pipeline)(source, targetStream);
             const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
+                timeout = setTimeout(() => {
                     targetStream.destroy();
                     reject(new Error(`COPY FROM timeout after ${timeoutMs / 1000}s`));
                 }, timeoutMs);
@@ -496,6 +515,10 @@ class PostgresCopy {
                 ? `Table or column does not exist: ${errorMsg}`
                 : `COPY FROM failed: ${errorMsg}`;
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), description, { itemIndex });
+        }
+        finally {
+            if (timeout)
+                clearTimeout(timeout);
         }
         return {
             json: {

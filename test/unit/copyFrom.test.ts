@@ -12,6 +12,17 @@ describe('PostgresCopy - COPY FROM', () => {
 	};
 
 	const sampleCsv = 'id,name\n1,Alice\n';
+	const setupQueryMock = (target: PassThrough, tableExists = true) => {
+		mockClient.query.mockImplementation((sql: any) => {
+			if (typeof sql === 'string') {
+				if (sql.includes('to_regclass')) {
+					return Promise.resolve({ rows: tableExists ? [{ regclass: 'test' }] : [] });
+				}
+				return Promise.resolve();
+			}
+			return target;
+		});
+	};
 
 	const makeContext = (item: INodeExecutionData): IExecuteFunctions => {
 		const items = [item];
@@ -46,10 +57,7 @@ describe('PostgresCopy - COPY FROM', () => {
 
 	it('streams COPY FROM without error', async () => {
 		const target = new PassThrough();
-		mockClient.query.mockImplementation((sql: any) => {
-			if (typeof sql === 'string') return Promise.resolve();
-			return target;
-		});
+		setupQueryMock(target);
 
 		const item: INodeExecutionData = {
 			json: {},
@@ -72,12 +80,29 @@ describe('PostgresCopy - COPY FROM', () => {
 		expect(result.json.success).toBe(true);
 	});
 
+	it('should throw error when table does not exist', async () => {
+		const target = new PassThrough();
+		setupQueryMock(target, false);
+
+		const item: INodeExecutionData = {
+			json: {},
+			binary: {
+				data: {
+					data: Buffer.from(sampleCsv).toString('base64'),
+					mimeType: 'text/csv',
+				},
+			},
+		};
+
+		const ctx = makeContext(item);
+		await expect(node.executeCopyFrom.call(ctx as any, mockClient as any, item, 0)).rejects.toThrow(
+			'Table does not exist',
+		);
+	});
+
 	it('should throw error when stream fails (Bug #1 fix)', async () => {
 		const target = new PassThrough();
-		mockClient.query.mockImplementation((sql: any) => {
-			if (typeof sql === 'string') return Promise.resolve();
-			return target;
-		});
+		setupQueryMock(target);
 
 		const item: INodeExecutionData = {
 			json: {},
@@ -102,10 +127,7 @@ describe('PostgresCopy - COPY FROM', () => {
 
 	it('should propagate pipeline errors properly (Bug #1 fix)', async () => {
 		const target = new PassThrough();
-		mockClient.query.mockImplementation((sql: any) => {
-			if (typeof sql === 'string') return Promise.resolve();
-			return target;
-		});
+		setupQueryMock(target);
 
 		const invalidCsv = 'id,name\ninvalid,data\n';
 		const item: INodeExecutionData = {

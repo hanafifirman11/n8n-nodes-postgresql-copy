@@ -282,29 +282,40 @@ export class PostgresCopy implements INodeType {
 			ssl: sslConfig,
 		});
 
-		try {
-			await client.connect();
+		await client.connect();
 
+		try {
 			for (let i = 0; i < items.length; i++) {
-				if (operation === 'copyTo') {
-					const result = await PostgresCopy.prototype.executeCopyTo.call(this, client, i);
-					returnData.push(result);
-				} else if (operation === 'copyFrom') {
-					const result = await PostgresCopy.prototype.executeCopyFrom.call(this, client, items[i], i);
-					returnData.push(result);
-				} else {
-					throw new NodeOperationError(this.getNode(), `Unsupported operation: ${operation}`, {
-						itemIndex: i,
-					});
+				try {
+					if (operation === 'copyTo') {
+						const result = await PostgresCopy.prototype.executeCopyTo.call(this, client, i);
+						returnData.push(result);
+					} else if (operation === 'copyFrom') {
+						const result = await PostgresCopy.prototype.executeCopyFrom.call(this, client, items[i], i);
+						returnData.push(result);
+					} else {
+						throw new NodeOperationError(this.getNode(), `Unsupported operation: ${operation}`, {
+							itemIndex: i,
+						});
+					}
+				} catch (error: any) {
+					// Handle errors per item
+					if (this.continueOnFail()) {
+						// Continue on fail: push error data to output
+						returnData.push({
+							json: {
+								error: error.message || String(error),
+							},
+							pairedItem: {
+								item: i,
+							},
+						});
+						continue;
+					}
+					// Re-throw error to stop workflow
+					throw error;
 				}
 			}
-		} catch (error: any) {
-			// If error is already a NodeOperationError, re-throw as-is to preserve metadata
-			if (error instanceof NodeOperationError) {
-				throw error;
-			}
-			// Otherwise wrap in NodeOperationError
-			throw new NodeOperationError(this.getNode(), error.message || String(error));
 		} finally {
 			await client.end().catch(() => {});
 		}
@@ -480,6 +491,13 @@ export class PostgresCopy implements INodeType {
 		const columnMapping = this.getNodeParameter('columnMapping', itemIndex, {}) as IDataObject;
 		const inputOptions = (this.getNodeParameter('inputOptions', itemIndex, {}) as IDataObject) || {};
 
+		const tableCheck = await client.query('SELECT to_regclass($1) as regclass', [tableName]);
+		if (!tableCheck.rows?.[0]?.regclass) {
+			throw new NodeOperationError(this.getNode(), `Table does not exist: ${tableName}`, {
+				itemIndex,
+			});
+		}
+
 		if (!item.binary || !item.binary[inputBinaryField]) {
 			throw new NodeOperationError(this.getNode(), `No binary data found in property "${inputBinaryField}"`, {
 				itemIndex,
@@ -512,6 +530,7 @@ export class PostgresCopy implements INodeType {
 
 		const dryRun = inputOptions.dryRun as boolean;
 		let rowsImported = 0;
+		let timeout: NodeJS.Timeout | undefined;
 
 		try {
 			await client.query('BEGIN');
@@ -523,7 +542,7 @@ export class PostgresCopy implements INodeType {
 			// Add timeout protection with race condition
 			const pipelinePromise = pipeline(source, targetStream);
 			const timeoutPromise = new Promise<never>((_, reject) => {
-				setTimeout(() => {
+				timeout = setTimeout(() => {
 					targetStream.destroy();
 					reject(new Error(`COPY FROM timeout after ${timeoutMs / 1000}s`));
 				}, timeoutMs);
@@ -547,6 +566,8 @@ export class PostgresCopy implements INodeType {
 				? `Table or column does not exist: ${errorMsg}`
 				: `COPY FROM failed: ${errorMsg}`;
 			throw new NodeOperationError(this.getNode(), description, { itemIndex });
+		} finally {
+			if (timeout) clearTimeout(timeout);
 		}
 
 		return {
