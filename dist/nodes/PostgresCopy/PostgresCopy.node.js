@@ -284,7 +284,12 @@ class PostgresCopy {
             }
         }
         catch (error) {
-            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message);
+            // If error is already a NodeOperationError, re-throw as-is to preserve metadata
+            if (error instanceof n8n_workflow_1.NodeOperationError) {
+                throw error;
+            }
+            // Otherwise wrap in NodeOperationError
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message || String(error));
         }
         finally {
             await client.end().catch(() => { });
