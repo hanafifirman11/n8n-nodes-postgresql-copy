@@ -62,12 +62,70 @@ describe('PostgresCopy - COPY FROM', () => {
 		};
 
 		const ctx = makeContext(item);
-		const promise = node.executeCopyFrom.call(ctx as any, mockClient as any, item, 0);
-		// simulate consumption
-		process.nextTick(() => {
-			target.end();
+
+		// Consume the stream data to simulate successful write
+		target.on('data', () => {
+			// drain data
 		});
-		const result = await promise;
+
+		const result = await node.executeCopyFrom.call(ctx as any, mockClient as any, item, 0);
 		expect(result.json.success).toBe(true);
+	});
+
+	it('should throw error when stream fails (Bug #1 fix)', async () => {
+		const target = new PassThrough();
+		mockClient.query.mockImplementation((sql: any) => {
+			if (typeof sql === 'string') return Promise.resolve();
+			return target;
+		});
+
+		const item: INodeExecutionData = {
+			json: {},
+			binary: {
+				data: {
+					data: Buffer.from(sampleCsv).toString('base64'),
+					mimeType: 'text/csv',
+				},
+			},
+		};
+
+		const ctx = makeContext(item);
+		const promise = node.executeCopyFrom.call(ctx as any, mockClient as any, item, 0);
+
+		// Simulate stream error (like data format mismatch)
+		process.nextTick(() => {
+			target.destroy(new Error('invalid input syntax for type integer'));
+		});
+
+		await expect(promise).rejects.toThrow();
+	});
+
+	it('should propagate pipeline errors properly (Bug #1 fix)', async () => {
+		const target = new PassThrough();
+		mockClient.query.mockImplementation((sql: any) => {
+			if (typeof sql === 'string') return Promise.resolve();
+			return target;
+		});
+
+		const invalidCsv = 'id,name\ninvalid,data\n';
+		const item: INodeExecutionData = {
+			json: {},
+			binary: {
+				data: {
+					data: Buffer.from(invalidCsv).toString('base64'),
+					mimeType: 'text/csv',
+				},
+			},
+		};
+
+		const ctx = makeContext(item);
+		const promise = node.executeCopyFrom.call(ctx as any, mockClient as any, item, 0);
+
+		// Simulate error during copy process
+		process.nextTick(() => {
+			target.emit('error', new Error('COPY failed'));
+		});
+
+		await expect(promise).rejects.toThrow('COPY failed');
 	});
 });

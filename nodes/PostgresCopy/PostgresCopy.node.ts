@@ -9,7 +9,7 @@ import {
 
 import { Client } from 'pg';
 import { from as copyFrom, to as copyTo } from 'pg-copy-streams';
-import { Readable } from 'stream';
+import { Readable, Writable } from 'stream';
 import { pipeline } from 'stream/promises';
 
 type CopyOptions = {
@@ -280,7 +280,6 @@ export class PostgresCopy implements INodeType {
 			user: credentials.user as string,
 			password: credentials.password as string,
 			ssl: sslConfig,
-			allowExitOnIdle: (credentials.allowExitOnIdle as boolean) || false,
 		});
 
 		try {
@@ -300,7 +299,7 @@ export class PostgresCopy implements INodeType {
 				}
 			}
 		} catch (error: any) {
-			throw new NodeOperationError(this.getNode(), error.message, { cause: error });
+			throw new NodeOperationError(this.getNode(), error.message);
 		} finally {
 			await client.end().catch(() => {});
 		}
@@ -357,6 +356,7 @@ export class PostgresCopy implements INodeType {
 	}
 
 	async executeCopyTo(
+		this: IExecuteFunctions,
 		client: Client,
 		itemIndex: number,
 	): Promise<INodeExecutionData> {
@@ -384,29 +384,58 @@ export class PostgresCopy implements INodeType {
 		const copyCommand = `COPY (${query}) TO STDOUT WITH (${copyOptions})`;
 
 		const start = Date.now();
-		const stream = client.query(copyTo(copyCommand));
+		let stream: Readable;
+
+		try {
+			// @ts-expect-error - pg-copy-streams returns Readable but pg types expect Submittable
+			stream = client.query(copyTo(copyCommand)) as unknown as Readable;
+		} catch (error: any) {
+			const errorMsg = error.message || String(error);
+			const description = errorMsg.includes('does not exist')
+				? `Table or column does not exist: ${errorMsg}`
+				: `COPY TO query failed: ${errorMsg}`;
+			throw new NodeOperationError(this.getNode(), description, { itemIndex });
+		}
+
 		const chunks: Buffer[] = [];
 		let rowCount = 0;
+		let streamError: Error | null = null;
 
 		const timeout = setTimeout(() => {
 			stream.destroy(new Error(`COPY TO timeout after ${timeoutMs / 1000}s`));
 		}, timeoutMs);
 
-		stream.on('data', (chunk: Buffer) => {
-			chunks.push(chunk);
-			rowCount += (chunk.toString().match(/\n/g) || []).length;
-		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				stream.on('data', (chunk: Buffer) => {
+					chunks.push(chunk);
+					rowCount += (chunk.toString().match(/\n/g) || []).length;
+				});
 
-		await new Promise<void>((resolve, reject) => {
-			stream.on('end', () => {
-				clearTimeout(timeout);
-				resolve();
+				stream.on('error', (err: Error) => {
+					clearTimeout(timeout);
+					streamError = err;
+					// Reject immediately on error to prevent hanging
+					reject(err);
+				});
+
+				stream.on('end', () => {
+					clearTimeout(timeout);
+					// Check if error occurred before end event
+					if (streamError) {
+						reject(streamError);
+					} else {
+						resolve();
+					}
+				});
 			});
-			stream.on('error', (err) => {
-				clearTimeout(timeout);
-				reject(err);
-			});
-		});
+		} catch (error: any) {
+			const errorMsg = error.message || String(error);
+			const description = errorMsg.includes('does not exist')
+				? `Table or column does not exist: ${errorMsg}`
+				: `COPY TO failed: ${errorMsg}`;
+			throw new NodeOperationError(this.getNode(), description, { itemIndex });
+		}
 
 		const fileBuffer = Buffer.concat(chunks);
 		if (includeHeader && rowCount > 0) rowCount -= 1;
@@ -433,10 +462,12 @@ export class PostgresCopy implements INodeType {
 	}
 
 	async executeCopyFrom(
+		this: IExecuteFunctions,
 		client: Client,
 		item: INodeExecutionData,
 		itemIndex: number,
 	): Promise<INodeExecutionData> {
+		const timeoutMs = 30000; // hard timeout to avoid hanging
 		const tableName = this.getNodeParameter('tableName', itemIndex) as string;
 		const inputBinaryField = this.getNodeParameter('inputBinaryField', itemIndex) as string;
 		const inputFormat = this.getNodeParameter('inputFormat', itemIndex) as string;
@@ -479,16 +510,22 @@ export class PostgresCopy implements INodeType {
 
 		try {
 			await client.query('BEGIN');
-			const targetStream = client.query(copyFrom(copyCommand));
+
+			// @ts-expect-error - pg-copy-streams returns Writable but pg types expect Submittable
+			const targetStream = client.query(copyFrom(copyCommand)) as unknown as Writable;
 			const source = Readable.from(buffer);
 
-			targetStream.on('error', (err: Error & { position?: string }) => {
-				if (inputOptions.skipErrors) {
-					// swallow to allow best-effort? But COPY stream will abort; simply rethrow
-				}
+			// Add timeout protection with race condition
+			const pipelinePromise = pipeline(source, targetStream);
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				setTimeout(() => {
+					targetStream.destroy();
+					reject(new Error(`COPY FROM timeout after ${timeoutMs / 1000}s`));
+				}, timeoutMs);
 			});
 
-			await pipeline(source, targetStream);
+			await Promise.race([pipelinePromise, timeoutPromise]);
+
 			// Row count is not easily available; leave undefined
 			rowsImported = 0;
 
@@ -499,7 +536,12 @@ export class PostgresCopy implements INodeType {
 			}
 		} catch (error: any) {
 			await client.query('ROLLBACK').catch(() => {});
-			throw new NodeOperationError(this.getNode(), error.message, { cause: error, itemIndex });
+			// Provide more descriptive error message
+			const errorMsg = error.message || String(error);
+			const description = errorMsg.includes('does not exist')
+				? `Table or column does not exist: ${errorMsg}`
+				: `COPY FROM failed: ${errorMsg}`;
+			throw new NodeOperationError(this.getNode(), description, { itemIndex });
 		}
 
 		return {

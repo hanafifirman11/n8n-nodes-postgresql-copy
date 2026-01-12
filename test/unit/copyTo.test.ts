@@ -57,4 +57,37 @@ describe('PostgresCopy - COPY TO', () => {
 		expect(result.json.rowCount).toBe(1);
 		expect(result.binary?.data).toBeTruthy();
 	});
+
+	it('should reject when stream emits error (Bug #2 fix)', async () => {
+		const stream = new PassThrough();
+		mockClient.query.mockReturnValue(stream);
+
+		const ctx = makeContext();
+		const promise = node.executeCopyTo.call(ctx as any, mockClient as any, 0);
+
+		// Simulate query error (like "relation does not exist")
+		process.nextTick(() => {
+			stream.emit('error', new Error('relation "transaction" does not exist'));
+			stream.end();
+		});
+
+		await expect(promise).rejects.toThrow('relation "transaction" does not exist');
+	});
+
+	it('should reject when error occurs before end event (Bug #2 fix)', async () => {
+		const stream = new PassThrough();
+		mockClient.query.mockReturnValue(stream);
+
+		const ctx = makeContext();
+		const promise = node.executeCopyTo.call(ctx as any, mockClient as any, 0);
+
+		// Simulate race condition: error event followed by end event
+		process.nextTick(() => {
+			stream.emit('error', new Error('query failed'));
+			// Even if end is emitted after error, should still reject
+			stream.emit('end');
+		});
+
+		await expect(promise).rejects.toThrow('query failed');
+	});
 });

@@ -5,6 +5,7 @@ const n8n_workflow_1 = require("n8n-workflow");
 const pg_1 = require("pg");
 const pg_copy_streams_1 = require("pg-copy-streams");
 const stream_1 = require("stream");
+const promises_1 = require("stream/promises");
 class PostgresCopy {
     constructor() {
         this.description = {
@@ -48,6 +49,7 @@ class PostgresCopy {
                     ],
                     default: 'copyTo',
                 },
+                // COPY TO
                 {
                     displayName: 'Query',
                     name: 'query',
@@ -139,6 +141,7 @@ class PostgresCopy {
                         },
                     ],
                 },
+                // COPY FROM
                 {
                     displayName: 'Table Name',
                     name: 'tableName',
@@ -252,7 +255,7 @@ class PostgresCopy {
         const items = this.getInputData();
         const returnData = [];
         const operation = this.getNodeParameter('operation', 0);
-        const credentials = await this.getCredentials('postgres');
+        const credentials = (await this.getCredentials('postgres'));
         const sslConfig = PostgresCopy.buildSslConfig(credentials);
         const client = new pg_1.Client({
             host: credentials.host,
@@ -261,7 +264,6 @@ class PostgresCopy {
             user: credentials.user,
             password: credentials.password,
             ssl: sslConfig,
-            allowExitOnIdle: credentials.allowExitOnIdle || false,
         });
         try {
             await client.connect();
@@ -282,7 +284,7 @@ class PostgresCopy {
             }
         }
         catch (error) {
-            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message, { cause: error });
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message);
         }
         finally {
             await client.end().catch(() => { });
@@ -308,29 +310,35 @@ class PostgresCopy {
             return custom || '|';
         return ',';
     }
+    // Normalize SSL config coming from n8n Postgres credentials to pg client format
     static buildSslConfig(creds) {
+        var _a;
         const sslVal = creds.ssl;
-        const ignore = creds.allowUnauthorizedCerts || creds.ignoreSslIssues || creds.rejectUnauthorized === false;
+        const ignore = creds.allowUnauthorizedCerts ||
+            creds.ignoreSslIssues ||
+            (creds.rejectUnauthorized === false);
         if (sslVal === false || sslVal === undefined) {
             return false;
         }
         if (typeof sslVal === 'string') {
             const v = sslVal.toLowerCase();
+            // values like "disable", "allow", "prefer" should not force SSL
             if (['disable', 'off', 'false', 'allow', 'prefer'].includes(v)) {
                 return false;
             }
+            // other string modes -> enable ssl
             return { rejectUnauthorized: ignore ? false : true };
         }
         if (sslVal === true) {
             return { rejectUnauthorized: ignore ? false : true };
         }
         if (typeof sslVal === 'object') {
-            return Object.assign(Object.assign({}, sslVal), { rejectUnauthorized: ignore ? false : sslVal.rejectUnauthorized ?? true });
+            return { ...sslVal, rejectUnauthorized: ignore ? false : (_a = sslVal.rejectUnauthorized) !== null && _a !== void 0 ? _a : true };
         }
         return false;
     }
     async executeCopyTo(client, itemIndex) {
-        const timeoutMs = 30000;
+        const timeoutMs = 30000; // hard timeout to avoid hanging
         const query = this.getNodeParameter('query', itemIndex);
         const outputFormat = this.getNodeParameter('outputFormat', itemIndex);
         const includeHeader = this.getNodeParameter('includeHeader', itemIndex);
@@ -347,26 +355,55 @@ class PostgresCopy {
         });
         const copyCommand = `COPY (${query}) TO STDOUT WITH (${copyOptions})`;
         const start = Date.now();
-        const stream = client.query((0, pg_copy_streams_1.to)(copyCommand));
+        let stream;
+        try {
+            // @ts-expect-error - pg-copy-streams returns Readable but pg types expect Submittable
+            stream = client.query((0, pg_copy_streams_1.to)(copyCommand));
+        }
+        catch (error) {
+            const errorMsg = error.message || String(error);
+            const description = errorMsg.includes('does not exist')
+                ? `Table or column does not exist: ${errorMsg}`
+                : `COPY TO query failed: ${errorMsg}`;
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), description, { itemIndex });
+        }
         const chunks = [];
         let rowCount = 0;
+        let streamError = null;
         const timeout = setTimeout(() => {
             stream.destroy(new Error(`COPY TO timeout after ${timeoutMs / 1000}s`));
         }, timeoutMs);
-        stream.on('data', (chunk) => {
-            chunks.push(chunk);
-            rowCount += (chunk.toString().match(/\n/g) || []).length;
-        });
-        await new Promise((resolve, reject) => {
-            stream.on('end', () => {
-                clearTimeout(timeout);
-                resolve();
+        try {
+            await new Promise((resolve, reject) => {
+                stream.on('data', (chunk) => {
+                    chunks.push(chunk);
+                    rowCount += (chunk.toString().match(/\n/g) || []).length;
+                });
+                stream.on('error', (err) => {
+                    clearTimeout(timeout);
+                    streamError = err;
+                    // Reject immediately on error to prevent hanging
+                    reject(err);
+                });
+                stream.on('end', () => {
+                    clearTimeout(timeout);
+                    // Check if error occurred before end event
+                    if (streamError) {
+                        reject(streamError);
+                    }
+                    else {
+                        resolve();
+                    }
+                });
             });
-            stream.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
-        });
+        }
+        catch (error) {
+            const errorMsg = error.message || String(error);
+            const description = errorMsg.includes('does not exist')
+                ? `Table or column does not exist: ${errorMsg}`
+                : `COPY TO failed: ${errorMsg}`;
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), description, { itemIndex });
+        }
         const fileBuffer = Buffer.concat(chunks);
         if (includeHeader && rowCount > 0)
             rowCount -= 1;
@@ -389,7 +426,7 @@ class PostgresCopy {
         };
     }
     async executeCopyFrom(client, item, itemIndex) {
-        var _a;
+        const timeoutMs = 30000; // hard timeout to avoid hanging
         const tableName = this.getNodeParameter('tableName', itemIndex);
         const inputBinaryField = this.getNodeParameter('inputBinaryField', itemIndex);
         const inputFormat = this.getNodeParameter('inputFormat', itemIndex);
@@ -425,10 +462,19 @@ class PostgresCopy {
         let rowsImported = 0;
         try {
             await client.query('BEGIN');
+            // @ts-expect-error - pg-copy-streams returns Writable but pg types expect Submittable
             const targetStream = client.query((0, pg_copy_streams_1.from)(copyCommand));
             const source = stream_1.Readable.from(buffer);
-            targetStream.on('error', () => { });
-            await (0, stream_1.pipeline)(source, targetStream);
+            // Add timeout protection with race condition
+            const pipelinePromise = (0, promises_1.pipeline)(source, targetStream);
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    targetStream.destroy();
+                    reject(new Error(`COPY FROM timeout after ${timeoutMs / 1000}s`));
+                }, timeoutMs);
+            });
+            await Promise.race([pipelinePromise, timeoutPromise]);
+            // Row count is not easily available; leave undefined
             rowsImported = 0;
             if (dryRun) {
                 await client.query('ROLLBACK');
@@ -439,7 +485,12 @@ class PostgresCopy {
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
-            throw new n8n_workflow_1.NodeOperationError(this.getNode(), error.message, { cause: error, itemIndex });
+            // Provide more descriptive error message
+            const errorMsg = error.message || String(error);
+            const description = errorMsg.includes('does not exist')
+                ? `Table or column does not exist: ${errorMsg}`
+                : `COPY FROM failed: ${errorMsg}`;
+            throw new n8n_workflow_1.NodeOperationError(this.getNode(), description, { itemIndex });
         }
         return {
             json: {
